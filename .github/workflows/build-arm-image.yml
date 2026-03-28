@@ -1,0 +1,95 @@
+name: Build ARM Architecture Docker Image
+
+# 触发条件：push到main分支、手动触发、release发布
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**/Dockerfile'  # 仅Dockerfile或源码变更时触发
+      - '.github/workflows/build-arm-image.yml'
+  workflow_dispatch:  # 手动触发
+  release:
+    types: [ published ]
+
+# 权限配置（推送镜像到GitHub Container Registry/GHCR需要）
+permissions:
+  contents: read
+  packages: write
+  pull-requests: read
+
+jobs:
+  build-arm-image:
+    runs-on: ubuntu-latest  # x86架构的GitHub Runner
+    steps:
+      # 1. 检出源码
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. 设置QEMU（模拟ARM架构）
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # 3. 设置Docker Buildx（支持跨架构构建）
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true  # 确保buildx完整安装
+          version: latest
+
+      # 4. 登录镜像仓库（可选，根据你的镜像仓库调整）
+      # 场景1：推送到GitHub Container Registry (GHCR)
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}  # GitHub自动生成的token，无需手动创建
+
+      # 场景2：推送到Docker Hub（需提前在GitHub Secrets配置DOCKER_HUB_USERNAME和DOCKER_HUB_TOKEN）
+      # - name: Login to Docker Hub
+      #   uses: docker/login-action@v3
+      #   with:
+      #     username: ${{ secrets.DOCKER_HUB_USERNAME }}
+      #     password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      # 5. 提取镜像标签（优化：根据分支/版本自动生成标签）
+      - name: Extract Metadata (Tags, Labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            # 替换为你的镜像地址（GHCR示例）
+            ghcr.io/${{ github.repository_owner }}/your-app-name
+            # Docker Hub示例：your-docker-username/your-app-name
+          tags: |
+            type=ref,event=branch
+            type=sha,short=7
+            type=semver,pattern={{version}}
+            type=raw,value=arm64,enable=true  # 明确标记ARM64架构
+
+      # 6. 跨架构构建并推送ARM镜像
+      - name: Build and Push ARM64 Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .  # Dockerfile所在目录（默认根目录，按需调整）
+          file: ./Dockerfile  # 你的Dockerfile路径
+          platforms: linux/arm64/v8  # 目标ARM架构（arm/v7需改为linux/arm/v7）
+          push: true  # 推送到镜像仓库（测试时可设为false，仅构建不推送）
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha  # 利用GitHub Actions缓存加速构建
+          cache-to: type=gha,mode=max
+
+      # 7. 可选：保存镜像到Workflow Artifact（方便下载本地测试）
+      - name: Save ARM Image to Artifact
+        run: |
+          # 拉取刚构建的镜像（因push=true，需重新拉取）
+          docker pull ${{ steps.meta.outputs.tags }}
+          # 保存为tar包
+          docker save -o arm64-image.tar ${{ steps.meta.outputs.tags }}
+      - name: Upload Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-docker-image
+          path: arm64-image.tar
+          retention-days: 7  # 保留7天
