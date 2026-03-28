@@ -1,4 +1,4 @@
-name: Build RAGFlow ARM64 Full Image (QEMU)
+name: Build RAGFlow ARM64 (Simplified)
 
 on:
   workflow_dispatch:
@@ -14,211 +14,41 @@ jobs:
           repository: infiniflow/ragflow
           fetch-depth: 1
 
-      # 设置 QEMU 模拟 ARM64
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          platforms: linux/arm64
-          driver-opts: network=host
 
-      # 修复 ARM64 兼容性问题
-      - name: Fix ARM64 compatibility
+      # 直接使用官方 Dockerfile，但通过 buildx 构建 ARM64
+      - name: Fix pyproject.toml
         run: |
-          # 修复 xgboost 版本
           sed -i 's/xgboost==1.5.0/xgboost==1.6.0/g' pyproject.toml
-          
-          # 修复 ONNX Runtime（ARM64 不支持 GPU 版本）
-          if grep -q "onnxruntime-gpu" pyproject.toml; then
-            sed -i 's/onnxruntime-gpu/onnxruntime/g' pyproject.toml
-          fi
-          
-          # 创建修复后的 Dockerfile.deps
-          cat > Dockerfile.deps.fixed << 'EOF'
-FROM ubuntu:22.04 AS deps_base
+          # 移除 onnxruntime-gpu 依赖（ARM64 不支持）
+          sed -i '/onnxruntime-gpu/d' pyproject.toml
+          # 添加 onnxruntime CPU 版本
+          echo "onnxruntime>=1.14.0" >> requirements.txt
 
-# 设置环境变量
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Asia/Shanghai
+      - name: Build and export ARM64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: ragflow:arm64-full
+          build-args: |
+            NEED_MIRROR=1
+            LIGHTEN=0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-# 安装系统依赖
-RUN apt-get update && apt-get install -y \
-    wget \
-    curl \
-    git \
-    gcc \
-    g++ \
-    make \
-    cmake \
-    python3 \
-    python3-pip \
-    python3-dev \
-    libssl-dev \
-    libffi-dev \
-    libodbc1 \
-    unixodbc \
-    unixodbc-dev \
-    libxml2-dev \
-    libxslt1-dev \
-    zlib1g-dev \
-    libbz2-dev \
-    libreadline-dev \
-    libsqlite3-dev \
-    liblzma-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# 创建 Python 软链接
-RUN ln -s /usr/bin/python3 /usr/bin/python
-
-# 安装 pip 和 uv
-RUN pip3 install --upgrade pip setuptools wheel
-RUN pip3 install uv
-
-# 设置 uv 配置
-RUN mkdir -p /root/.config/uv && \
-    echo '[[index]]' > /root/.config/uv/uv.toml && \
-    echo 'url = "https://mirrors.aliyun.com/pypi/simple"' >> /root/.config/uv/uv.toml && \
-    echo 'default = true' >> /root/.config/uv/uv.toml
-
-# 设置工作目录
-WORKDIR /ragflow
-
-# 复制项目文件
-COPY pyproject.toml README.md ./
-COPY rag rag/
-COPY agent agent/
-COPY api api/
-COPY common common/
-COPY conf conf/
-COPY deepdoc deepdoc/
-COPY graphrag graphrag/
-COPY sdk sdk/
-COPY web web/
-
-# 安装 Python 依赖（ARM64 优化）
-RUN uv pip install --system --no-cache \
-    -e . \
-    -i https://mirrors.aliyun.com/pypi/simple/ \
-    --extra-index-url https://download.pytorch.org/whl/cpu
-
-# 清理缓存
-RUN rm -rf /root/.cache/pip /root/.cache/uv
-EOF
-
-      # 使用修复后的 Dockerfile 构建依赖镜像
-      - name: Build dependencies with fixed Dockerfile
-        run: |
-          # 构建依赖镜像
-          docker buildx build \
-            --platform linux/arm64 \
-            -f Dockerfile.deps.fixed \
-            --load \
-            -t ragflow-deps:arm64 \
-            .
-
-      # 创建修复后的主 Dockerfile
-      - name: Create fixed main Dockerfile
-        run: |
-          cat > Dockerfile.fixed << 'EOF'
-FROM ragflow-deps:arm64 AS builder
-
-# 复制完整代码
-COPY . /ragflow
-
-# 安装额外依赖
-RUN uv pip install --system --no-cache \
-    huggingface_hub \
-    nltk \
-    transformers \
-    torch \
-    --index-url https://mirrors.aliyun.com/pypi/simple/
-
-# 下载模型（离线部署用）
-RUN python3 -c "
-import os
-from huggingface_hub import snapshot_download
-
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-
-# 下载必要的模型
-models = [
-    'BAAI/bge-large-zh-v1.5',
-    'BAAI/bge-large-en-v1.5',
-    'sentence-transformers/all-MiniLM-L6-v2'
-]
-
-for model in models:
-    try:
-        print(f'Downloading {model}...')
-        snapshot_download(repo_id=model, local_dir=f'/ragflow/model/{model}')
-    except Exception as e:
-        print(f'Warning: {e}')
-" || true
-
-FROM ubuntu:22.04
-
-# 安装运行时依赖
-RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
-    libssl3 \
-    libffi8 \
-    libodbc1 \
-    unixodbc \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# 复制 Python 环境和应用
-COPY --from=builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
-COPY --from=builder /ragflow /ragflow
-
-# 设置环境变量
-ENV PYTHONPATH=/ragflow
-ENV LIGHTEN=0
-ENV HF_ENDPOINT=https://hf-mirror.com
-
-# 创建工作目录
-RUN mkdir -p /ragflow/data /ragflow/logs
-
-# 暴露端口
-EXPOSE 9380
-
-# 启动脚本
-RUN cat > /start.sh << 'SCRIPT'
-#!/bin/bash
-cd /ragflow
-export PYTHONPATH=/ragflow
-python3 api/ragflow_server.py
-SCRIPT
-
-RUN chmod +x /start.sh
-
-CMD ["/start.sh"]
-EOF
-
-      # 构建主镜像
-      - name: Build main image
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            -f Dockerfile.fixed \
-            --load \
-            -t ragflow:arm64-full \
-            .
-
-      # 导出镜像
       - name: Export image
         run: |
           docker save ragflow:arm64-full | gzip > ragflow-arm64-full.tar.gz
-          echo "镜像大小:"
           ls -lh ragflow-arm64-full.tar.gz
 
-      # 上传 artifact
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
