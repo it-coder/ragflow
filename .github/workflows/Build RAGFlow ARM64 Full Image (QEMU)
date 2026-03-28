@@ -1,0 +1,58 @@
+name: Build RAGFlow ARM64 Full Image (QEMU)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest  # 改用 x86 runner，资源充足
+    
+    steps:
+      - name: Checkout RAGFlow
+        uses: actions/checkout@v4
+        with:
+          repository: infiniflow/ragflow
+          fetch-depth: 1
+
+      # 关键：设置 QEMU 模拟 ARM64
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Fix ARM64 compatibility
+        run: |
+          sed -i 's/xgboost==1.5.0/xgboost==1.6.0/g' pyproject.toml
+
+      - name: Download models
+        run: |
+          pip install huggingface_hub nltk
+          export HF_ENDPOINT=https://hf-mirror.com
+          python3 download_deps.py || true
+
+      # 使用 buildx 构建 ARM64 镜像
+      - name: Build and export ARM64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: ragflow:arm64-full
+          build-args: |
+            NEED_MIRROR=1
+            LIGHTEN=0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export image
+        run: docker save ragflow:arm64-full | gzip > ragflow-arm64-full.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ragflow-arm64-full
+          path: ragflow-arm64-full.tar.gz
+          retention-days: 30
